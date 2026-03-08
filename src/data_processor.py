@@ -1,4 +1,26 @@
 
+
+"""
+data_processor.py
+-----------------
+Loads and cleans the 20 Newsgroups corpus from the raw .tar.gz archive.
+
+Design decisions (preprocessing):
+  - Strip full email headers: Things like NNTP-Posting-Host or Organization 
+    add noise without semantic content. I kept only the Subject line because 
+    it is a highly condensed topical signal.
+  - Remove quoted reply text: Lines starting with > or | duplicate content 
+    from other documents and heavily pollute the embeddings. I want to cluster 
+    based on novel content, not reply chains.
+  - Remove signatures: Everything after the standard signature delimiter 
+    is boilerplate, not topical content.
+  - Remove URLs and email addresses: I remove these so the model does not 
+    cluster documents simply because they share a domain name or contact info.
+  - Drop short documents: Documents with fewer than 50 words after cleaning 
+    are discarded. They carry too little semantic content to cluster or 
+    retrieve meaningfully in a vector space.
+"""
+
 import tarfile
 import re
 import os
@@ -19,17 +41,20 @@ class NewsDocument:
 
     @property
     def full_text(self) -> str:
-        """Combine subject + body for embedding — subject is high-signal."""
+        """Combine subject and body for embedding. The subject is a high-signal indicator."""
         return f"{self.subject}. {self.body}" if self.subject else self.body
 
 
+# Headers that carry zero topical signal. I strip them entirely to prevent noise.
 _JUNK_HEADERS = re.compile(
     r'^(From|Reply-To|NNTP-Posting-Host|Organization|Lines|Message-ID|'
     r'References|Distribution|X-Newsreader|Newsgroups|Path|Date|'
     r'Xref|Article-I\.D\.|Sender|Approved|Expires|Followup-To):.+$',
     re.MULTILINE | re.IGNORECASE,
 )
+# Quoted replies duplicate other documents' content.
 _QUOTED_LINES = re.compile(r'^[ \t]*[>|].*$', re.MULTILINE)
+# Strip emails and URLs as they are identifiers, not semantics.
 _EMAIL = re.compile(r'\S+@\S+\.\S+')
 _URL = re.compile(r'https?://\S+|www\.\S+')
 _WHITESPACE = re.compile(r'\n{3,}')
@@ -44,10 +69,15 @@ def _clean_body(raw: str) -> tuple[str, str]:
     parts = raw.split('\n\n', 1)
     header_block = parts[0]
     body = parts[1] if len(parts) > 1 else ""
+    
+    # Extract Subject because it is semantically valuable
     subject_match = re.search(r'^Subject:\s*(.+)$', header_block, re.MULTILINE | re.IGNORECASE)
     subject = subject_match.group(1).strip() if subject_match else ""
+    
+    # Clean subject of Re:, Fwd:, etc. so it only contains the core topic
     subject = re.sub(r'^(Re|Fwd|AW|WG):\s*', '', subject, flags=re.IGNORECASE).strip()
 
+    # Drop signature blocks (standard email/usenet sig delimiter)
     sig_split = re.split(r'\n--\s*\n', body, maxsplit=1)
     body = sig_split[0]
 
@@ -90,6 +120,8 @@ def load_corpus(archive_path: str, min_words: int = 50) -> list[NewsDocument]:
                 body=body,
             )
 
+            # Filter out near-empty documents. Empirically, shorter documents 
+            # after cleaning are too sparse to produce meaningful embeddings.
             if doc.word_count < min_words:
                 skipped += 1
                 continue

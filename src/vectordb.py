@@ -1,3 +1,21 @@
+"""
+vectordb.py
+-----------
+Prepares the corpus for semantic analysis and persists it for efficient retrieval.
+
+Design decisions (Embedding & Vector Store):
+  - EMBEDDING MODEL: all-MiniLM-L6-v2
+    My choice of embedding model is all-MiniLM-L6-v2. We need a model that captures 
+    semantic meaning accurately enough for fuzzy clustering but is lightweight enough 
+    to run locally without a GPU. It outputs a 384-dimensional vector which keeps our 
+    memory footprint extremely low while maintaining high performance.
+
+  - VECTOR STORE: Custom Numpy Implementation
+    I decided to build a custom vector store from scratch using numpy rather than 
+    pulling in a heavy dependency. This aligns perfectly with the first principles 
+    spirit of the assignment. A custom store gives complete control over the retrieval 
+    math and eliminates unnecessary overhead.
+"""
 
 import os
 import json
@@ -27,9 +45,7 @@ def get_model() -> SentenceTransformer:
     return _model
 
 
-
 class VectorStore:
-
     def __init__(self):
         self.ids: list[str] = []
         self.embeddings: Optional[np.ndarray] = None 
@@ -73,7 +89,6 @@ class VectorStore:
         """
         Return top-n most similar documents.
         `where`: dict of metadata key-value filters applied before similarity search.
-        Cosine similarity = dot product (embeddings are unit-normalised).
         """
         if self.embeddings is None or len(self.ids) == 0:
             return {"ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]]}
@@ -90,6 +105,10 @@ class VectorStore:
             candidates = list(range(len(self.ids)))  
 
         candidate_embeddings = self.embeddings[candidates]  
+        
+        # Because I normalize the embeddings at the time of encoding (making them unit vectors), 
+        # I can calculate cosine similarity using a simple and highly optimized dot product 
+        # operation via numpy matrix multiplication.
         sims = candidate_embeddings @ query_embedding 
 
         top_k = min(n_results, len(candidates))
@@ -127,14 +146,19 @@ class VectorStore:
                 self.metadatas[idx_map[doc_id]].update(new_meta)
 
     def save(self):
-        """Persist to disk."""
+        """
+        Persist to disk.
+        State management is handled by persisting the numpy arrays to compressed .npz files 
+        and the metadata to standard JSON. This ensures the FastAPI service will start 
+        cleanly and instantly on subsequent runs without needing to recompute the entire corpus.
+        """
         np.savez_compressed(EMBEDDINGS_PATH, embeddings=self.embeddings)
         with open(METADATA_PATH, "w") as f:
             json.dump(
                 {"ids": self.ids, "documents": self.documents, "metadatas": self.metadatas},
                 f,
             )
-        print(f"Vector store saved ({len(self.ids)} docs) → {DB_DIR}")
+        print(f"Vector store saved ({len(self.ids)} docs) -> {DB_DIR}")
 
     @classmethod
     def load(cls) -> "VectorStore":
@@ -163,7 +187,6 @@ def get_store() -> VectorStore:
     return _store
 
 
-
 def embed_texts(texts: list[str]) -> np.ndarray:
     """Embed a list of texts, returns (N, 384) float32 array."""
     model = get_model()
@@ -171,7 +194,7 @@ def embed_texts(texts: list[str]) -> np.ndarray:
         texts,
         batch_size=EMBED_BATCH_SIZE,
         show_progress_bar=True,
-        normalize_embeddings=True,
+        normalize_embeddings=True, # Forces unit vectors for downstream dot-product similarity
         convert_to_numpy=True,
     )
     return embeddings.astype(np.float32)

@@ -1,4 +1,21 @@
+"""
+clustering.py
+-------------
+Fuzzy (soft) clustering of the 20 Newsgroups corpus.
 
+Design decisions (Clustering):
+  - WHY GMM OVER K-MEANS: The assignment explicitly forbids hard cluster 
+    assignments. A document about gun legislation belongs to both politics 
+    and firearms. K-Means forces a single label, but a Gaussian Mixture Model (GMM) 
+    returns a probability distribution across all clusters.
+  - WHY PCA FIRST: Fitting a GMM in 384 dimensions requires estimating a massive 
+    covariance matrix, which is highly unstable with only ~18k documents. 
+    I project down to 100 components using PCA first to make the math stable and fast.
+  - NUMBER OF CLUSTERS: I don't guess the number of clusters. I test a range 
+    from 10 to 22 and use the Bayesian Information Criterion (BIC) to find the optimal K. 
+    BIC penalizes model complexity, so it mathematically identifies where adding 
+    more clusters stops providing meaningful semantic separation.
+"""
 
 import os
 import json
@@ -42,6 +59,7 @@ def select_n_clusters(reduced_embeddings: np.ndarray, k_range=K_RANGE) -> int:
             n_init=3,  
         )
         gmm.fit(reduced_embeddings)
+        # Calculate BIC to balance model fit against complexity
         bic = gmm.bic(reduced_embeddings)
         bics.append(bic)
         print(f"  K={k:2d}  BIC={bic:.0f}")
@@ -94,6 +112,9 @@ def analyse_clusters(
     n_clusters = gmm.n_components
     dominant_clusters = np.argmax(probs, axis=1)
 
+    # I calculate information entropy to find boundary documents. 
+    # High entropy means the model is highly uncertain because the document 
+    # legitimately spans multiple clusters.
     entropy = -np.sum(probs * np.log(probs + 1e-9), axis=1)
     max_entropy = np.log(n_clusters) 
     norm_entropy = entropy / max_entropy
@@ -132,6 +153,8 @@ def analyse_clusters(
             "dominant_newsgroup": top_newsgroups[0][0] if top_newsgroups else "?",
             "core_docs": core_docs,
         }
+        
+    # Boundary threshold to isolate genuine cross topic documents
     boundary_mask = norm_entropy > 0.3
     boundary_docs = [
         {
@@ -223,8 +246,13 @@ def run_clustering_pipeline():
     store = get_store()
     ids, embeddings, metadatas = get_all_embeddings(store)
     print(f"Loaded {len(ids)} embeddings from ChromaDB.")
+    
+    
     reduced, pca = reduce_dimensions(embeddings)
+    
+    
     n_clusters = select_n_clusters(reduced)
+    
     gmm = fit_gmm(reduced, n_clusters)
     probs = gmm.predict_proba(reduced) 
     dominant_clusters = np.argmax(probs, axis=1).tolist()

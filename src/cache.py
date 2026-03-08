@@ -1,3 +1,36 @@
+"""
+cache.py
+--------
+Cluster-aware semantic cache — built entirely from scratch.
+No Redis, Memcached, or any caching library.
+
+Design overview:
+  The cache maps query embeddings to results. Instead of exact string matching,
+  it checks if an incoming query is "close enough" (by cosine similarity) to
+  any cached query. If yes, it returns the cached result without recomputing.
+
+The key tunable decision — similarity threshold (θ):
+  - θ = 0.70: very permissive. "What planets orbit the sun?" would hit
+    on "How many planets are in the solar system?". This inflates hit rate
+    but returns wrong or misleading answers for genuinely different questions.
+  - θ = 0.85: a reasonable default. It catches genuine paraphrases
+    ("machine learning applications" ≈ "uses of ML") while rejecting
+    questions that are merely in the same topic area.
+  - θ = 0.95: extremely conservative. Almost pure deduplication.
+    Useful if the result computation is very cheap and you care more about
+    accuracy than latency reduction.
+  
+  What this reveals: At low θ, the cache reveals which semantic neighborhoods 
+  are densely queried. At high θ, it reveals exact query repetition patterns.
+
+Cluster-aware lookup (the O(N) efficiency trick):
+  A naïve cache scans all N entries to find similar queries, which is O(N) per lookup.
+  By using the cluster structure built in Part 2, I first identify the dominant 
+  cluster(s) of the new query, then only scan cached entries from those specific clusters. 
+  If the cache has entries across K clusters and I only scan the top-2 clusters, 
+  I reduce expected scan cost from O(N) to O(N/K * 2). This is a massive speedup as N grows.
+"""
+
 import time
 import hashlib
 import threading
@@ -26,15 +59,22 @@ class SemanticCache:
             raise ValueError("similarity_threshold must be in (0, 1]")
 
         self.threshold = similarity_threshold
+        
+        # We scan the top 2 clusters to account for "boundary" queries that straddle topics
         self.top_k_clusters = top_clusters_to_scan
 
+        # Primary Data Structure: A dictionary mapping Cluster ID to a list of CacheEntries.
+        # This enables O(1) cluster-bucket lookup.
         self._cluster_buckets: dict[int, list[CacheEntry]] = defaultdict(list)
 
+        # Fast-path global index: Maps a SHA256 query hash to a CacheEntry.
+        # This allows identical queries to bypass the similarity scan entirely for an O(1) hit.
         self._exact_index: dict[str, CacheEntry] = {}
 
         self._hit_count = 0
         self._miss_count = 0
 
+        # Thread safety via RLock allows multiple FastAPI workers to safely share the cache instance
         self._lock = threading.RLock()
 
 
@@ -45,6 +85,7 @@ class SemanticCache:
         cluster_probs: np.ndarray,
     ) -> Optional[tuple[CacheEntry, float]]:
         with self._lock:
+            # Step 1: Exact match fast-path (O(1) lookup)
             qhash = _hash_query(query)
             if qhash in self._exact_index:
                 entry = self._exact_index[qhash]
@@ -52,11 +93,14 @@ class SemanticCache:
                 self._hit_count += 1
                 return entry, 1.0 
 
+            # Step 2: Cluster-aware similarity scan (O(N/K) lookup)
+            # Find the top-K clusters by this query's membership probability
             top_cluster_ids = np.argsort(cluster_probs)[::-1][: self.top_k_clusters]
 
             best_entry = None
             best_sim = -1.0
 
+            # Only scan the buckets belonging to the query's dominant clusters
             for cluster_id in top_cluster_ids:
                 bucket = self._cluster_buckets.get(int(cluster_id), [])
                 for entry in bucket:
@@ -80,6 +124,7 @@ class SemanticCache:
         cluster_probs: np.ndarray,
         result: Any,
     ) -> CacheEntry:
+        # Assign the new cache entry to its dominant cluster bucket
         dominant_cluster = int(np.argmax(cluster_probs))
         entry = CacheEntry(
             query=query,
@@ -163,8 +208,11 @@ class SemanticCache:
         )
 
 
-
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    """
+    Since embeddings are normalized at encoding time (normalize_embeddings=True),
+    cosine similarity reduces to a simple, highly optimized dot product.
+    """
     return float(np.dot(a, b))
 
 

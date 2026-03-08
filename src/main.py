@@ -1,3 +1,23 @@
+"""
+main.py
+
+This file implements the FastAPI service.
+
+Design decisions (API and State Management):
+  * STATE MANAGEMENT: I used the FastAPI lifespan context manager to load the 
+    SentenceTransformer model, the custom vector store, and the GMM cluster 
+    model exactly once into memory at startup. This ensures the API endpoints 
+    are extremely fast and do not suffer from cold start latency.
+  * CACHE LIFECYCLE: The custom SemanticCache is instantiated globally within 
+    the AppState so it persists across all incoming POST requests and maintains 
+    accurate hit/miss statistics.
+  * RETRIEVAL STRATEGY: Inside the _compute_result function, I use the query's 
+    dominant cluster to filter the vector database search. This restricts the 
+    search space, making retrieval much faster than a brute force global scan. 
+    If that specific cluster is too sparse, the system safely falls back to a 
+    global scan.
+"""
+
 import os
 import json
 import pickle
@@ -33,7 +53,7 @@ GMM_MODEL_PATH = os.path.join(os.path.dirname(__file__), "../data/gmm_model.pkl"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-
+    # Models and data are loaded once at startup to prevent latency on individual requests
     print("Starting up — loading resources...")
 
     # 1. ChromaDB
@@ -105,9 +125,10 @@ class ThresholdRequest(BaseModel):
 
 
 def _compute_result(query_embedding: np.ndarray, cluster_probs: np.ndarray) -> str:
-
+    
     dominant_cluster = int(np.argmax(cluster_probs))
 
+    # Two-step retrieval: First try to find matches exclusively within the predicted cluster
     results = query_similar(
         query_embedding,
         state.collection,
@@ -115,6 +136,7 @@ def _compute_result(query_embedding: np.ndarray, cluster_probs: np.ndarray) -> s
         where={"dominant_cluster": dominant_cluster} if dominant_cluster is not None else None,
     )
 
+    # Fallback: If the cluster bucket is empty or sparse, search globally
     if not results["ids"][0] or len(results["ids"][0]) < 3:
         results = query_similar(query_embedding, state.collection, n_results=5)
 
@@ -145,6 +167,7 @@ async def post_query(body: QueryRequest):
     cluster_probs = predict_query_clusters(query_embedding, state.pca, state.gmm)
     dominant_cluster = int(np.argmax(cluster_probs))
 
+    # Check the custom semantic cache before computing results
     cache_result = state.cache.get(query, query_embedding, cluster_probs)
 
     if cache_result is not None:
@@ -160,6 +183,7 @@ async def post_query(body: QueryRequest):
 
     result = _compute_result(query_embedding, cluster_probs)
 
+    # Cache miss: store the new computation for future queries
     state.cache.put(query, query_embedding, cluster_probs, result)
 
     return QueryResponse(
