@@ -1,3 +1,4 @@
-.vemv
-data\original
-src\__pycache__
+.venv/
+data/original/
+src/__pycache__/
+*.pyc
