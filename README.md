@@ -59,7 +59,7 @@ If you prefer to run the service locally without Docker:
 * **Custom Vector Store:** Instead of a heavy third-party dependency, I built a custom Vector Store using **NumPy**. Embeddings are normalized at encoding time (unit vectors), allowing the system to use highly optimized dot-product matrix multiplication for cosine similarity lookups.
 
 ### Part 2: Fuzzy Clustering (Gaussian Mixture Model)
-![GMM Clustering Visualization](data\cluster_viz.png)
+![GMM Clustering Visualization](data/cluster_viz.png)
 * **Soft Clustering:** Hard clustering (like K-Means) forces documents into single categories, which fails for intersecting topics like "Space Medicine" or "Gun Legislation". I implemented a **Gaussian Mixture Model (GMM)** to soft-cluster the documents.
 * **Dimensionality Reduction:** To ensure mathematical stability in 384-dimensional space, I first projected the embeddings down to 100 dimensions using **PCA**.
 * **Model Selection:** To justify the number of clusters without guessing, I tested a range of $K$ values and evaluated them using the **Bayesian Information Criterion (BIC)**. 
