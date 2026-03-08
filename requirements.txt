@@ -1,0 +1,10 @@
+# Core ML
+sentence-transformers
+scikit-learn
+numpy
+chromadb
+fastapi
+uvicorn[standard]
+pydantic
+matplotlib
+python-dotenv
